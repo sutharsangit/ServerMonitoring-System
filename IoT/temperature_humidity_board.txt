@@ -1,0 +1,71 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHT.h"
+#include "time.h"
+#define DHTPIN 13
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
+const char* apiUrl = "http://10.175.146.214:3000/am2305";
+const char* ntpServer = "pool.ntp.org";
+String getTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "TimeFail";
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+  configTime(19800, 0, ntpServer);
+}
+void loop() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("❌ Sensor Error!");
+    delay(2000);
+    return;
+  }
+  String timeNow = getTime();
+  Serial.print(timeNow);
+  Serial.print(" | Temp: ");
+  Serial.print(temperature);
+  Serial.print(" | Hum: ");
+  Serial.println(humidity);
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(apiUrl);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Prefer", "return=representation"); // optional
+    String json = "{";
+    json += "\"temperature\":" + String(temperature) + ",";
+    json += "\"humidity\":" + String(humidity);
+    json += "}";
+    Serial.println("Sending JSON:");
+    Serial.println(json);
+    int httpCode = http.POST(json);
+    Serial.print("HTTP Response Code: ");
+    Serial.println(httpCode);
+    String response = http.getString();
+    Serial.println("Response:");
+    Serial.println(response);
+    http.end();
+  } else {
+    Serial.println("WiFi Disconnected");
+  }
+  Serial.println("----------------------");
+  delay(1000); 
+}

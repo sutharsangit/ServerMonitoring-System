@@ -1,0 +1,166 @@
+#include <ModbusMaster.h>
+#include <math.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <time.h>
+#include <sys/time.h>
+#define RXD2 16
+#define TXD2 17
+#define MAX485_DE 4
+#define MAX485_RE 4
+#define SENSOR_ID 0x50
+ModbusMaster node;
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
+const char* apiUrl = "http://10.175.146.214:3000/vibration_data";
+const char* ntpServer = "pool.ntp.org";
+const char* deviceName = "f7b6c909-38a3-468c-bf4f-2a9580352d1b";
+const char* version = "10056.2.10";
+void preTransmission() {
+  digitalWrite(MAX485_DE, 1);
+  digitalWrite(MAX485_RE, 1);
+}
+void postTransmission() {
+  digitalWrite(MAX485_DE, 0);
+  digitalWrite(MAX485_RE, 0);
+}
+void getNtpDateTime(char *buffer, size_t len) {
+  struct tm timeinfo;
+  struct timeval tv;
+  if (getLocalTime(&timeinfo)) {
+    gettimeofday(&tv, NULL);
+    int ms = tv.tv_usec / 1000;
+    snprintf(buffer, len,
+      "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+      timeinfo.tm_year + 1900,
+      timeinfo.tm_mon + 1,
+      timeinfo.tm_mday,
+      timeinfo.tm_hour,
+      timeinfo.tm_min,
+      timeinfo.tm_sec,
+      ms);
+  } else {
+    snprintf(buffer, len, "1970-01-01 00:00:00.000");
+  }
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(MAX485_DE, OUTPUT);
+  pinMode(MAX485_RE, OUTPUT);
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  Serial2.setTimeout(100);
+  node.begin(SENSOR_ID, Serial2);
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+  Serial.println(WiFi.localIP());
+  configTime(19800, 0, ntpServer);
+}
+void loop() {
+  char espTime[30];
+  getNtpDateTime(espTime, sizeof(espTime));
+  uint8_t result = node.readHoldingRegisters(0x30, 24);
+  if (result == node.ku8MBSuccess) {
+    uint16_t t1 = node.getResponseBuffer(0);
+    uint16_t t2 = node.getResponseBuffer(1);
+    uint16_t t3 = node.getResponseBuffer(2);
+    int year  = (t1 >> 8);
+    int month = (t1 & 0xFF);
+    int day   = (t2 >> 8);
+    int hour  = (t2 & 0xFF);
+    int min   = (t3 >> 8);
+    int sec   = (t3 & 0xFF);
+    if (month < 1 || month > 12) month = 1;
+    if (day < 1 || day > 31) day = 1;
+    char chip_time[32];
+    sprintf(chip_time,
+      "20%02d-%02d-%02d %02d:%02d:%02d",
+      year, month, day, hour, min, sec);
+    float ax = (int16_t)node.getResponseBuffer(4) / 32768.0 * 16.0;
+    float ay = (int16_t)node.getResponseBuffer(5) / 32768.0 * 16.0;
+    float az = (int16_t)node.getResponseBuffer(6) / 32768.0 * 16.0;
+    float ax_amp = fabs(ax);
+    float ay_amp = fabs(ay);
+    float az_amp = fabs(az);
+    float vx = node.getResponseBuffer(10) / 10.0;
+    float vy = node.getResponseBuffer(11) / 10.0;
+    float vz = node.getResponseBuffer(12) / 10.0;
+    int dx = node.getResponseBuffer(17);
+    int dy = node.getResponseBuffer(18);
+    int dz = node.getResponseBuffer(19);
+    int fx = node.getResponseBuffer(20);
+    int fy = node.getResponseBuffer(21);
+    int fz = node.getResponseBuffer(22);
+    float temp = node.getResponseBuffer(16) / 100.0;
+    Serial.printf(
+      "%s | AX:%.3f AY:%.3f AZ:%.3f | VX:%.2f VY:%.2f VZ:%.2f | TEMP:%.2f\n",
+      espTime, ax, ay, az, vx, vy, vz, temp
+    );
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      http.begin(apiUrl);
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("Prefer", "return=minimal");
+      char json[512];
+      snprintf(json, sizeof(json),
+        "{"
+        "\"datetime\":\"%s\","
+        "\"device_name\":\"%s\","
+        "\"accel_x\":%.4f,"
+        "\"accel_y\":%.4f,"
+        "\"accel_z\":%.4f,"
+        "\"accel_x_amp\":%.4f,"
+        "\"accel_y_amp\":%.4f,"
+        "\"accel_z_amp\":%.4f,"
+        "\"vel_x\":%.2f,"
+        "\"vel_y\":%.2f,"
+        "\"vel_z\":%.2f,"
+        "\"disp_x\":%d,"
+        "\"disp_y\":%d,"
+        "\"disp_z\":%d,"
+        "\"freq_x\":%d,"
+        "\"freq_y\":%d,"
+        "\"freq_z\":%d,"
+        "\"chip_time\":\"%s\","
+        "\"temperature\":%.2f,"
+        "\"version\":\"%s\""
+        "}",
+        espTime,
+        deviceName,
+        ax, ay, az,
+        ax_amp, ay_amp, az_amp,
+        vx, vy, vz,
+        dx, dy, dz,
+        fx, fy, fz,
+        chip_time,
+        temp,
+        version
+      );
+      Serial.println("Sending JSON:");
+      Serial.println(json);
+      int code = http.POST((uint8_t*)json, strlen(json));
+      Serial.print("HTTP Response: ");
+      Serial.println(code);
+      if (code > 0) {
+        String response = http.getString();
+        Serial.println("Response:");
+        Serial.println(response);
+      } else {
+        Serial.println("HTTP Failed");
+      }
+      http.end();
+    } else {
+      Serial.println("WiFi Lost! Reconnecting...");
+      WiFi.reconnect();
+    }
+  } else {
+    Serial.println("Modbus read error");
+  }
+  delay(1000);
+}

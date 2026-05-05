@@ -1,0 +1,114 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ModbusMaster.h>
+#include "time.h"
+#define RXD2 16
+#define TXD2 17
+#define RS485_DIR 4
+ModbusMaster node;
+// WiFi
+const char* ssid = "SSID";
+const char* password = "PASSWORD";
+// Raspberry Pi API (CHANGE if needed)
+const char* apiUrl = "http://10.175.146.214:3000/noise_data";
+// Time
+const char* ntpServer = "pool.ntp.org";
+// RS485 control
+void preTransmission() {
+  digitalWrite(RS485_DIR, HIGH);
+  delay(2);
+}
+void postTransmission() {
+  delay(2);
+  digitalWrite(RS485_DIR, LOW);
+}
+// Get formatted time
+String getTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "TimeFail";
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(RS485_DIR, OUTPUT);
+  digitalWrite(RS485_DIR, LOW);
+  Serial2.begin(4800, SERIAL_8N1, RXD2, TXD2);
+
+  node.begin(1, Serial2);
+  node.preTransmission(preTransmission);
+  node.postTransmission(postTransmission);
+
+  // WiFi connect
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected");
+  Serial.println(WiFi.localIP());
+
+  // IST Time
+  configTime(19800, 0, ntpServer);
+}
+
+void loop() {
+  uint8_t result = node.readHoldingRegisters(0x0000, 1);
+
+  if (result == node.ku8MBSuccess) {
+
+    uint16_t raw = node.getResponseBuffer(0);
+    float noise = raw / 10.0;
+
+    String timeNow = getTime();
+
+    Serial.print(timeNow);
+    Serial.print(" | Noise (dB): ");
+    Serial.println(noise);
+
+    // Send to Raspberry Pi
+    if (WiFi.status() == WL_CONNECTED) {
+
+      HTTPClient http;
+      http.begin(apiUrl);
+      http.addHeader("Content-Type", "application/json");
+      http.addHeader("Prefer", "return=minimal");
+
+      String json = "{";
+      json += "\"timestamp\":\"" + timeNow + "\",";
+      json += "\"noise_db\":" + String(noise);
+      json += "}";
+
+      Serial.println("Sending JSON:");
+      Serial.println(json);
+
+      int code = http.POST(json);
+
+      Serial.print("HTTP Response: ");
+      Serial.println(code);
+
+      if (code > 0) {
+        String response = http.getString();
+        Serial.println("Response:");
+        Serial.println(response);
+      } else {
+        Serial.println("HTTP Failed");
+      }
+
+      http.end();
+
+    } else {
+      Serial.println("WiFi Lost! Reconnecting...");
+      WiFi.reconnect();
+    }
+
+  } else {
+    Serial.print("Modbus error: ");
+    Serial.println(result);
+  }
+  delay(1000); // match your other boards
+}
